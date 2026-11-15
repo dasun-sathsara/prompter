@@ -14,8 +14,8 @@ behind the Zed editor.
 - Resizes from any edge or corner. Drags from the strip at the top.
 - Fades its own backdrop from 15% to 100%. The words stay at full contrast, so
   the script never goes muddy.
-- Sets type from 16 to 120 points in any installed font, including the fonts you
-  have added to macOS.
+- Sets type from 10 to 120 points in any installed font, at five weights, with a
+  search field to find a family among the hundreds macOS reports.
 - Rolls the script on its own, at a speed you can nudge.
 
 ## Using it
@@ -26,7 +26,8 @@ behind the Zed editor.
 | Resize | Drag any window edge or corner |
 | Text size | `−` / `+` in the strip, or `Command +` / `Command -` |
 | Backdrop | The slider in the strip, drag the knob |
-| Typeface | `Aa` opens the family list |
+| Typeface | `Aa` opens the family list, type to search, `Return` picks the first match |
+| Weight | The five `Aa` chips above the family list |
 | Paste a script | `Command V` |
 | Open a file | `Command O` |
 | Roll the script | `Space` |
@@ -78,12 +79,15 @@ linker, which is what Apple silicon requires to run an unsigned build at all.
 
 ## How the window is put together
 
+There is no window title, in the strip or in the window menu.
+
 The window is a `WindowKind::PopUp` in GPUI, which on macOS is an `NSPanel` with
 the non-activating style at `NSPopUpWindowLevel`, plus
 `CanJoinAllSpaces | FullScreenAuxiliary`. The app runs as an accessory app, so
 it has no Dock icon and no menu bar. `src/mac.rs` adds the parts GPUI does not
 set: `setHidesOnDeactivate(false)` so the panel survives another app taking
-focus, hidden traffic lights, no AppKit shadow, and stationary collection
+focus, `mouseDownCanMoveWindow` overridden to `NO` so only the strip moves the
+window, hidden traffic lights, no AppKit shadow, and stationary collection
 behaviour.
 
 `PROMPTER_DEBUG_WINDOW=1 ./Prompter.app/Contents/MacOS/prompter` prints what

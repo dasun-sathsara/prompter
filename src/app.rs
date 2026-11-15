@@ -61,6 +61,8 @@ pub struct Prompter {
     opacity_bounds: Rc<Cell<Bounds<Pixels>>>,
     playing: bool,
     notice: Option<(SharedString, std::time::Instant)>,
+    font_query: String,
+    font_cursor: usize,
     focus: FocusHandle,
     save_generation: u64,
     _bounds_observer: Option<Subscription>,
@@ -100,6 +102,8 @@ impl Prompter {
             opacity_bounds: Rc::new(Cell::new(Bounds::default())),
             playing: false,
             notice: None,
+            font_query: String::new(),
+            font_cursor: 0,
             focus: cx.focus_handle(),
             save_generation: 0,
             _bounds_observer: None,
@@ -162,9 +166,33 @@ impl Prompter {
         self.settings.font_family = family.as_ref().map(|f| f.to_string());
         self.family = family.clone();
         self.font_menu_open = false;
+        self.font_query.clear();
+        self.font_cursor = 0;
         let name = family.unwrap_or_else(|| SharedString::from("System"));
         self.flash(name, window, cx);
         self.save_debounced(window, cx);
+    }
+
+    fn choose_weight(&mut self, weight: f32, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.font_weight = weight;
+        self.save_debounced(window, cx);
+        cx.notify();
+    }
+
+    fn pick_filtered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.font_query.trim().to_lowercase();
+        let matches: Vec<SharedString> = self
+            .families
+            .iter()
+            .filter(|family| query.is_empty() || family.to_lowercase().contains(&query))
+            .cloned()
+            .collect();
+        if matches.is_empty() {
+            return;
+        }
+        let index = self.font_cursor.min(matches.len() - 1);
+        let family = matches[index].clone();
+        self.choose_family(Some(family), window, cx);
     }
 
     fn toggle_play(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -287,6 +315,44 @@ impl Prompter {
             }
             return;
         }
+        if self.font_menu_open {
+            match key {
+                "escape" => {
+                    self.font_menu_open = false;
+                    self.font_query.clear();
+                    self.font_cursor = 0;
+                    cx.notify();
+                }
+                "backspace" => {
+                    if self.font_query.pop().is_some() {
+                        self.font_cursor = 0;
+                        cx.notify();
+                    }
+                }
+                "enter" => self.pick_filtered(window, cx),
+                "down" => {
+                    self.font_cursor = self.font_cursor.saturating_add(1);
+                    cx.notify();
+                }
+                "up" => {
+                    self.font_cursor = self.font_cursor.saturating_sub(1);
+                    cx.notify();
+                }
+                _ => {
+                    if let Some(text) = keystroke.key_char.as_ref() {
+                        if !text.is_empty()
+                            && !keystroke.modifiers.control
+                            && !keystroke.modifiers.alt
+                        {
+                            self.font_query.push_str(text);
+                            self.font_cursor = 0;
+                            cx.notify();
+                        }
+                    }
+                }
+            }
+            return;
+        }
         match key {
             "space" => self.toggle_play(window, cx),
             "up" => self.scroll_by(-1.0, cx),
@@ -298,16 +364,6 @@ impl Prompter {
                 }
             }
             _ => {}
-        }
-    }
-
-    fn status_label(&self) -> SharedString {
-        if let Some((text, _)) = self.notice.as_ref() {
-            return text.clone();
-        }
-        match self.family.as_ref() {
-            Some(family) => family.clone(),
-            None => SharedString::from("System"),
         }
     }
 
@@ -356,13 +412,13 @@ impl Prompter {
                     .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, window, _| {
                         window.start_window_move()
                     })
-                    .child(
+                    .children(self.notice.as_ref().map(|(text, _)| {
                         div()
                             .text_size(px(10.5))
-                            .text_color(theme::faint(if self.notice.is_some() { 0.66 } else { 0.32 }))
+                            .text_color(theme::faint(0.66))
                             .font_weight(FontWeight::MEDIUM)
-                            .child(self.status_label()),
-                    ),
+                            .child(text.clone())
+                    })),
             )
             .child(
                 div()
@@ -463,40 +519,135 @@ impl Prompter {
     }
 
     fn font_menu(&mut self, available: f32, cx: &mut Context<Self>) -> AnyElement {
+        let query = self.font_query.trim().to_lowercase();
         let active = self.family.clone();
-        let mut rows: Vec<AnyElement> = Vec::with_capacity(self.families.len() + 1);
-        rows.push(system_font_row(active.is_none(), cx));
-        for family in self.families.iter() {
-            let label = family.clone();
-            let selected = active.as_ref() == Some(family);
-            rows.push(font_row_element(label.to_string(), selected, {
-                let family = family.clone();
-                cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
-                    this.choose_family(Some(family.clone()), window, cx)
-                })
-            })
-            .into_any_element());
+
+        let matches: Vec<SharedString> = self
+            .families
+            .iter()
+            .filter(|family| query.is_empty() || family.to_lowercase().contains(&query))
+            .cloned()
+            .collect();
+        let cursor = self.font_cursor.min(matches.len().saturating_sub(1));
+
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(matches.len() + 1);
+        if query.is_empty() || "system".contains(&query) {
+            rows.push(system_font_row(active.is_none(), false, cx));
         }
+        for (index, family) in matches.iter().enumerate() {
+            let selected = active.as_ref() == Some(family);
+            let highlighted = !query.is_empty() && index == cursor;
+            let picked = family.clone();
+            rows.push(
+                font_row_element(
+                    family.to_string(),
+                    selected,
+                    highlighted,
+                    cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
+                        this.choose_family(Some(picked.clone()), window, cx)
+                    }),
+                )
+                .into_any_element(),
+            );
+        }
+        if matches.is_empty() {
+            rows.push(
+                div()
+                    .h(px(24.0))
+                    .px(px(9.0))
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.5))
+                    .text_color(theme::faint(0.34))
+                    .child("Nothing matches")
+                    .into_any_element(),
+            );
+        }
+
+        let list_height =
+            (rows.len() as f32 * 23.0 + 6.0).min((available - 84.0).max(46.0));
+        let empty = self.font_query.is_empty();
+        let search_text = if empty {
+            SharedString::from("Search fonts")
+        } else {
+            SharedString::from(format!("{}|", self.font_query))
+        };
+        let weight_name = WEIGHTS
+            .iter()
+            .find(|(value, _)| (self.settings.font_weight - value).abs() < 1.0)
+            .map(|(_, name)| *name)
+            .unwrap_or("Variable");
 
         div()
             .id("font-menu")
             .absolute()
             .top(px(theme::STRIP - 2.0))
             .right(px(8.0))
-            .w(px(236.0))
-            .max_h(px(available.max(72.0)))
+            .w(px(252.0))
+            .max_h(px(available.max(96.0)))
+            .flex()
+            .flex_col()
             .rounded(px(10.0))
             .border_1()
             .border_color(theme::faint(0.14))
             .bg(gpui::hsla(220.0 / 360.0, 0.16, 0.085, 0.985))
-            .overflow_y_scroll()
-            .track_scroll(&self.font_scroll)
-            .pt(px(5.0))
-            .pb(px(6.0))
+            .overflow_hidden()
             .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _window, cx| {
                 cx.stop_propagation();
             })
-            .children(rows)
+            .child(
+                div()
+                    .id("font-search")
+                    .mx(px(7.0))
+                    .mt(px(7.0))
+                    .h(px(24.0))
+                    .px(px(7.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .rounded(px(6.0))
+                    .bg(theme::faint(0.07))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.0))
+                            .text_color(theme::faint(if empty { 0.36 } else { 0.92 }))
+                            .child(search_text),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .mx(px(7.0))
+                    .mt(px(7.0))
+                    .children(weight_chips(self.settings.font_weight, cx))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme::faint(0.34))
+                            .child(weight_name),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(1.0))
+                    .mx(px(7.0))
+                    .mt(px(7.0))
+                    .mb(px(5.0))
+                    .bg(theme::faint(0.09)),
+            )
+            .child(
+                div()
+                    .id("font-list")
+                    .h(px(list_height))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.font_scroll)
+                    .pb(px(6.0))
+                    .children(rows),
+            )
             .into_any_element()
     }
 
@@ -523,6 +674,7 @@ impl Prompter {
                     .when_some(family, |this, family| this.font_family(family))
                     .text_size(px(size))
                     .line_height(relative(1.46))
+                    .font_weight(FontWeight(self.settings.font_weight))
                     .text_color(theme::text())
                     .child(
                         div()
@@ -664,10 +816,11 @@ fn grip_dots() -> impl IntoElement {
     div().flex().flex_col().gap(px(2.0)).children(rows)
 }
 
-fn system_font_row(selected: bool, cx: &mut Context<Prompter>) -> AnyElement {
+fn system_font_row(selected: bool, highlighted: bool, cx: &mut Context<Prompter>) -> AnyElement {
     font_row_element(
         "System".to_string(),
         selected,
+        highlighted,
         cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
             this.choose_family(None, window, cx)
         }),
@@ -678,9 +831,11 @@ fn system_font_row(selected: bool, cx: &mut Context<Prompter>) -> AnyElement {
 fn font_row_element(
     label: String,
     selected: bool,
+    highlighted: bool,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let marker: Hsla = if selected { theme::accent(1.0) } else { theme::faint(0.0) };
+    let row_bg: Hsla = if highlighted { theme::faint(0.10) } else { theme::faint(0.0) };
     div()
         .id(SharedString::from(format!("font:{}", label)))
         .h(px(23.0))
@@ -690,6 +845,7 @@ fn font_row_element(
         .items_center()
         .gap(px(7.0))
         .cursor(CursorStyle::PointingHand)
+        .bg(row_bg)
         .hover(|this| this.bg(theme::control_hover(0.8)))
         .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _window, cx| {
             cx.stop_propagation();
@@ -702,6 +858,46 @@ fn font_row_element(
                 .text_color(if selected { theme::faint(1.0) } else { theme::faint(0.72) })
                 .child(label),
         )
+}
+
+/// The five weights worth offering for a prompter, with their CSS values.
+const WEIGHTS: [(f32, &str); 5] = [
+    (300.0, "Light"),
+    (400.0, "Regular"),
+    (500.0, "Medium"),
+    (600.0, "Semibold"),
+    (700.0, "Bold"),
+];
+
+fn weight_chips(current: f32, cx: &mut Context<Prompter>) -> Vec<AnyElement> {
+    WEIGHTS
+        .iter()
+        .map(|(weight, _)| {
+            let active = (current - weight).abs() < 1.0;
+            div()
+                .id(SharedString::from(format!("weight:{weight}")))
+                .h(px(21.0))
+                .w(px(27.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .cursor(CursorStyle::PointingHand)
+                .bg(theme::faint(if active { 0.15 } else { 0.02 }))
+                .hover(|this| this.bg(theme::faint(0.12)))
+                .text_size(px(11.0))
+                .text_color(theme::faint(if active { 1.0 } else { 0.5 }))
+                .font_weight(FontWeight(*weight))
+                .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                })
+                .on_click(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
+                    this.choose_weight(*weight, window, cx)
+                }))
+                .child("Aa")
+                .into_any_element()
+        })
+        .collect()
 }
 
 fn installed_families(cx: &mut Context<Prompter>) -> Vec<SharedString> {

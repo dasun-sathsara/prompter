@@ -7,8 +7,14 @@
 #[cfg(target_os = "macos")]
 pub fn configure(window: &mut gpui::Window) {
     use objc2::msg_send;
-    use objc2::runtime::{AnyObject, Bool};
+    use objc2::runtime::{AnyObject, Bool, Imp, Sel};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    /// AppKit's view returns YES for this on a non-opaque window, so any drag on
+    /// the panel moved it, including a drag on the opacity slider.
+    unsafe extern "C-unwind" fn refuse_background_drag(_: *mut AnyObject, _: Sel) -> Bool {
+        Bool::from(false)
+    }
 
     let Ok(handle) = window.window_handle() else {
         return;
@@ -29,6 +35,20 @@ pub fn configure(window: &mut gpui::Window) {
         // The one that matters: a visible panel must survive another app taking
         // focus. Clicking Chrome would otherwise hide the prompter.
         let _: () = msg_send![ns_window, setHidesOnDeactivate: Bool::from(false)];
+
+        // Only the strip's grip and its empty middle move the window.
+        let view_class: *mut objc2::runtime::AnyClass = msg_send![view, class];
+        let imp: Imp = std::mem::transmute::<*const (), Imp>(refuse_background_drag as *const ());
+        let installed = objc2::ffi::class_addMethod(
+            view_class,
+            objc2::sel!(mouseDownCanMoveWindow),
+            imp,
+            c"B@:".as_ptr(),
+        );
+
+        // No title anywhere: neither over the script nor in the window menu.
+        let empty: *mut AnyObject = msg_send![objc2::class!(NSString), string];
+        let _: () = msg_send![ns_window, setTitle: empty];
 
         // No title text over the script, and no traffic lights on the strip.
         let hidden_title: isize = 1; // NSWindowTitleVisibility.hidden
@@ -70,6 +90,13 @@ pub fn configure(window: &mut gpui::Window) {
                 "window level={level} hidesOnDeactivate={} opaque={} collectionBehavior={behavior:#x}",
                 hides.as_bool(),
                 opaque.as_bool()
+            );
+            // The same call AppKit makes before it starts a background drag.
+            let can_move: Bool = msg_send![view, mouseDownCanMoveWindow];
+            eprintln!(
+                "view mouseDownCanMoveWindow={} (override installed={})",
+                can_move.as_bool(),
+                installed.as_bool()
             );
         }
     }
