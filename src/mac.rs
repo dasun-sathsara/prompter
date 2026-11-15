@@ -48,6 +48,30 @@ pub fn configure(window: &mut gpui::Window) {
         // so Mission Control leaves the prompter where it is.
         let behavior: usize = (1 << 0) | (1 << 4) | (1 << 8);
         let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
+
+        // `PROMPTER_DEBUG_WINDOW=1 prompter` prints what AppKit actually holds,
+        // which is the only way to check this from outside a debugger.
+        if std::env::var_os("PROMPTER_DEBUG_WINDOW").is_some() {
+            let mask: usize = msg_send![ns_window, styleMask];
+            let level: isize = msg_send![ns_window, level];
+            let hides: Bool = msg_send![ns_window, hidesOnDeactivate];
+            let opaque: Bool = msg_send![ns_window, isOpaque];
+            let behavior: usize = msg_send![ns_window, collectionBehavior];
+            eprintln!(
+                "window styleMask={mask:#x} (titled={} closable={} miniaturizable={} resizable={} nonactivating_panel={} full_size_content={})",
+                mask & 1 != 0,
+                mask & 2 != 0,
+                mask & 4 != 0,
+                mask & 8 != 0,
+                mask & 0x80 != 0,
+                mask & 0x8000 != 0,
+            );
+            eprintln!(
+                "window level={level} hidesOnDeactivate={} opaque={} collectionBehavior={behavior:#x}",
+                hides.as_bool(),
+                opaque.as_bool()
+            );
+        }
     }
 }
 

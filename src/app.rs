@@ -104,6 +104,13 @@ impl Prompter {
             save_generation: 0,
             _bounds_observer: None,
         };
+        if std::env::var_os("PROMPTER_DEBUG_WINDOW").is_some() {
+            eprintln!(
+                "fonts: {} families installed, using {:?}",
+                this.families.len(),
+                this.family
+            );
+        }
         this.focus.focus(window, cx);
         let bounds = window.bounds();
         this.settings.width = f32::from(bounds.size.width);
