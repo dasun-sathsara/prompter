@@ -15,8 +15,9 @@ behind the Zed editor.
 - Fades its own backdrop from 15% to 100%. The words stay at full contrast, so
   the script never goes muddy.
 - Sets type from 10 to 120 points in any installed font, at five weights, with a
-  search field to find a family among the hundreds macOS reports.
-- Rolls the script on its own, at a speed you can nudge.
+  search field to find a family among the hundreds macOS reports, and renders
+  `*italic*` and `**bold**` Markdown emphasis.
+- Rolls the script on its own, at a speed you can adjust.
 
 ## Using it
 
@@ -24,14 +25,15 @@ behind the Zed editor.
 | --- | --- |
 | Move | Drag the dotted grip or the empty part of the top strip |
 | Resize | Drag any window edge or corner |
-| Text size | `−` / `+` in the strip, or `Command +` / `Command -` |
+| Text size | `−` / `+` in the strip, `Command +` / `Command -`, or `Command 0` to reset |
 | Backdrop | The slider in the strip, drag the knob |
-| Typeface | `Aa` opens the family list, type to search, `Return` picks the first match |
+| Typeface | `Aa` opens the family list, type to search, `↑` / `↓` and `Return` to pick |
 | Weight | The five `Aa` chips above the family list |
 | Paste a script | `Command V` |
-| Open a file | `Command O` |
-| Roll the script | `Space` |
-| Scroll by hand | Wheel, or `↑` / `↓` |
+| Open a file | `Command O`, or drop a text file onto the window |
+| Roll / pause | `▸` in the strip, or `Space` (`Escape` pauses) |
+| Roll speed | Click the speed number, scroll over `▸`, `[` / `]`, or `Shift ↑` / `Shift ↓` |
+| Scroll by hand | Wheel, `↑` / `↓`, `PageUp` / `PageDown`, or `Home` |
 | Quit | `×` in the strip, or `Command Q` |
 
 A script can also be passed on the command line: `prompter ~/script.txt`.
@@ -86,9 +88,9 @@ the non-activating style at `NSPopUpWindowLevel`, plus
 `CanJoinAllSpaces | FullScreenAuxiliary`. The app runs as an accessory app, so
 it has no Dock icon and no menu bar. `src/mac.rs` adds the parts GPUI does not
 set: `setHidesOnDeactivate(false)` so the panel survives another app taking
-focus, `mouseDownCanMoveWindow` overridden to `NO` so only the strip moves the
-window, hidden traffic lights, no AppKit shadow, and stationary collection
-behaviour.
+focus, `mouseDownCanMoveWindow` overridden to `NO` and `app_owns_titlebar_drag: true`
+so AppKit never steals slider drags in the titlebar strip, hidden traffic lights,
+no AppKit shadow, and stationary collection behaviour.
 
 `PROMPTER_DEBUG_WINDOW=1 ./Prompter.app/Contents/MacOS/prompter` prints what
 AppKit holds for the window, which is the quickest way to check the panel is
@@ -96,4 +98,4 @@ still non-activating, resizable and at pop-up level.
 
 The transparency is per-pixel alpha from `WindowBackgroundAppearance::Transparent`.
 The panel's fill colour carries the opacity; the text colour does not, which is
-why the script stays legible at 10%.
+why the script stays legible at 15%.

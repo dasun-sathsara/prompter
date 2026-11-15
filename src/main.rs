@@ -1,5 +1,6 @@
 mod app;
 mod mac;
+mod markdown;
 mod settings;
 mod theme;
 
@@ -46,7 +47,12 @@ fn window_options(bounds: Bounds<Pixels>) -> WindowOptions {
         focus: true,
         show: true,
         is_movable: true,
+        // We draw our own control strip and move the window explicitly via
+        // `start_window_move`; otherwise AppKit treats the titlebar strip
+        // (including the opacity slider) as a native drag region.
+        app_owns_titlebar_drag: true,
         is_resizable: true,
+        is_minimizable: false,
         window_background: WindowBackgroundAppearance::Transparent,
         window_min_size: Some(size(px(320.0), px(140.0))),
         #[cfg(not(target_os = "macos"))]

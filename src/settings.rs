@@ -17,7 +17,7 @@ pub struct Settings {
     /// 100 to 900, as CSS weights. Variable fonts follow it, static ones snap
     /// to the nearest installed face.
     pub font_weight: f32,
-    /// Backdrop alpha, 0.10 to 1.0. Text stays opaque whatever this is.
+    /// Backdrop alpha, 0.15 to 1.0. Text stays opaque whatever this is.
     pub opacity: f32,
     pub width: f32,
     pub height: f32,
@@ -54,6 +54,12 @@ impl Settings {
         self.width = self.width.clamp(320.0, 4000.0);
         self.height = self.height.clamp(140.0, 3000.0);
         self.scroll_speed = self.scroll_speed.clamp(4.0, 200.0);
+        if self.x.is_some_and(|x| !x.is_finite()) {
+            self.x = None;
+        }
+        if self.y.is_some_and(|y| !y.is_finite()) {
+            self.y = None;
+        }
     }
 
     pub fn load() -> Self {
@@ -66,13 +72,22 @@ impl Settings {
         settings
     }
 
-    pub fn save(&self) {
+    pub fn to_json(&self) -> Option<String> {
+        serde_json::to_string_pretty(self).ok()
+    }
+
+    pub fn write_serialized(text: &str) {
         let path = config_file();
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, text);
+        let _ = std::fs::write(path, text);
+    }
+
+    #[allow(dead_code)]
+    pub fn save(&self) {
+        if let Some(text) = self.to_json() {
+            Self::write_serialized(&text);
         }
     }
 }

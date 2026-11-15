@@ -37,6 +37,7 @@ pub fn configure(window: &mut gpui::Window) {
         let _: () = msg_send![ns_window, setHidesOnDeactivate: Bool::from(false)];
 
         // Only the strip's grip and its empty middle move the window.
+        let _: () = msg_send![ns_window, setMovableByWindowBackground: Bool::from(false)];
         let view_class: *mut objc2::runtime::AnyClass = msg_send![view, class];
         let imp: Imp = std::mem::transmute::<*const (), Imp>(refuse_background_drag as *const ());
         let installed = objc2::ffi::class_addMethod(
@@ -102,5 +103,31 @@ pub fn configure(window: &mut gpui::Window) {
     }
 }
 
+/// Give the non-activating panel key-window status (without activating the app)
+/// so keyboard shortcuts and font-search input work after interacting with other apps.
+#[cfg(target_os = "macos")]
+pub fn make_key(window: &mut gpui::Window) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    unsafe {
+        let view = appkit.ns_view.as_ptr() as *mut AnyObject;
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if !ns_window.is_null() {
+            let _: () = msg_send![ns_window, makeKeyWindow];
+        }
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn configure(_window: &mut gpui::Window) {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn make_key(_window: &mut gpui::Window) {}
