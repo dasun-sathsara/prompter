@@ -2,6 +2,8 @@ mod app;
 mod mac;
 mod markdown;
 mod settings;
+#[cfg(target_os = "macos")]
+mod smooth_text;
 mod theme;
 
 use app::Prompter;
@@ -14,6 +16,9 @@ use gpui_platform::application;
 use settings::Settings;
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    mac::configure_process_text_rendering();
+
     let script_arg = std::env::args().nth(1);
     application().run(move |cx: &mut App| {
         #[cfg(target_os = "macos")]
@@ -52,7 +57,7 @@ fn window_options(bounds: Bounds<Pixels>) -> WindowOptions {
         // (including the opacity slider) as a native drag region.
         app_owns_titlebar_drag: true,
         is_resizable: true,
-        is_minimizable: false,
+        is_minimizable: true,
         window_background: WindowBackgroundAppearance::Transparent,
         window_min_size: Some(size(px(320.0), px(140.0))),
         #[cfg(not(target_os = "macos"))]

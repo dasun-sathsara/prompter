@@ -4,6 +4,35 @@
 //! out matter here: a panel hides itself when its app deactivates unless told
 //! otherwise, and a panel keeps a standard titlebar and traffic lights.
 
+/// Disable CoreGraphics font-smoothing dilation inside this process before
+/// GPUI caches `AppleFontSmoothing` or rasterizes any UI chrome glyphs.
+/// Setting it in `NSArgumentDomain` stays strictly in memory and never touches
+/// the user's global or app defaults on disk.
+#[cfg(target_os = "macos")]
+pub fn configure_process_text_rendering() {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use std::ffi::CStr;
+
+    unsafe fn ns_string(text: &CStr) -> *mut AnyObject {
+        unsafe { msg_send![objc2::class!(NSString), stringWithUTF8String: text.as_ptr()] }
+    }
+
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let defaults: *mut AnyObject =
+            msg_send![objc2::class!(NSUserDefaults), standardUserDefaults];
+        if defaults.is_null() {
+            return;
+        }
+        let key = ns_string(c"AppleFontSmoothing");
+        let zero: *mut AnyObject = msg_send![objc2::class!(NSNumber), numberWithInt: 0i32];
+        let domain: *mut AnyObject =
+            msg_send![objc2::class!(NSDictionary), dictionaryWithObject: zero, forKey: key];
+        let argument_domain = ns_string(c"NSArgumentDomain");
+        let _: () = msg_send![defaults, setVolatileDomain: domain, forName: argument_domain];
+    });
+}
+
 #[cfg(target_os = "macos")]
 pub fn configure(window: &mut gpui::Window) {
     use objc2::msg_send;
@@ -103,26 +132,51 @@ pub fn configure(window: &mut gpui::Window) {
     }
 }
 
+#[cfg(target_os = "macos")]
+unsafe fn ns_window_for(window: &gpui::Window) -> Option<*mut objc2::runtime::AnyObject> {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return None;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return None;
+    };
+    let view = appkit.ns_view.as_ptr() as *mut AnyObject;
+    let ns_window: *mut AnyObject = msg_send![view, window];
+    if ns_window.is_null() {
+        None
+    } else {
+        Some(ns_window)
+    }
+}
+
 /// Give the non-activating panel key-window status (without activating the app)
 /// so keyboard shortcuts and font-search input work after interacting with other apps.
 #[cfg(target_os = "macos")]
 pub fn make_key(window: &mut gpui::Window) {
     use objc2::msg_send;
-    use objc2::runtime::AnyObject;
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    let Ok(handle) = window.window_handle() else {
-        return;
-    };
-    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
-        return;
-    };
     unsafe {
-        let view = appkit.ns_view.as_ptr() as *mut AnyObject;
-        let ns_window: *mut AnyObject = msg_send![view, window];
-        if !ns_window.is_null() {
+        if let Some(ns_window) = ns_window_for(window) {
             let _: () = msg_send![ns_window, makeKeyWindow];
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn is_miniaturized(window: &gpui::Window) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::Bool;
+
+    unsafe {
+        let Some(ns_window) = ns_window_for(window) else {
+            return false;
+        };
+        let mini: Bool = msg_send![ns_window, isMiniaturized];
+        mini.as_bool()
     }
 }
 
@@ -131,3 +185,8 @@ pub fn configure(_window: &mut gpui::Window) {}
 
 #[cfg(not(target_os = "macos"))]
 pub fn make_key(_window: &mut gpui::Window) {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn is_miniaturized(_window: &gpui::Window) -> bool {
+    false
+}

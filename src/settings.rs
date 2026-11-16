@@ -23,8 +23,6 @@ pub struct Settings {
     pub height: f32,
     pub x: Option<f32>,
     pub y: Option<f32>,
-    /// Points per second when the prompter rolls by itself.
-    pub scroll_speed: f32,
     /// Last script opened, reopened on launch when it still exists.
     pub script_path: Option<String>,
 }
@@ -40,7 +38,6 @@ impl Default for Settings {
             height: 264.0,
             x: None,
             y: None,
-            scroll_speed: 28.0,
             script_path: None,
         }
     }
@@ -53,7 +50,6 @@ impl Settings {
         self.opacity = self.opacity.clamp(MIN_OPACITY, MAX_OPACITY);
         self.width = self.width.clamp(320.0, 4000.0);
         self.height = self.height.clamp(140.0, 3000.0);
-        self.scroll_speed = self.scroll_speed.clamp(4.0, 200.0);
         if self.x.is_some_and(|x| !x.is_finite()) {
             self.x = None;
         }

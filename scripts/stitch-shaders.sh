@@ -59,7 +59,8 @@ s = s.replace('    #[cfg(any(target_os = "macos", target_os = "ios"))]\n    appl
               '    apple_build::run();')
 s = s.replace('#[cfg(any(target_os = "macos", target_os = "ios"))]\nmod apple_build {',
               'mod apple_build {')
-s = s.replace('    #[cfg(not(feature = "runtime_shaders"))]\n    use std::ffi::OsString;\n', '')
+s = s.replace('    #[cfg(not(feature = "runtime_shaders"))]\n    use std::ffi::OsString;\n',
+              '    use std::ffi::OsString;\n')
 s = s.replace('        #[cfg(feature = "runtime_shaders")]\n        emit_stitched_shaders(&header_path);\n        #[cfg(not(feature = "runtime_shaders"))]\n        compile_metal_shaders(&header_path);',
               '        emit_stitched_shaders(&header_path);')
 s = s.replace('    #[cfg(not(feature = "runtime_shaders"))]\n    fn compile_metal_shaders',

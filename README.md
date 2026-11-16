@@ -1,49 +1,33 @@
 # Prompter
 
-A floating script window for macOS. It stays above whatever you are reading
-from, it is see-through, and it never steals focus.
+A floating, translucent script overlay for macOS that stays on top of full-screen apps without taking focus. Built in Rust with [GPUI](https://github.com/zed-industries/zed).
 
-Built in Rust with [GPUI](https://github.com/zed-industries/zed), the framework
-behind the Zed editor.
+![Prompter](assets/screenshot.png)
 
-## What it does
+## Features
 
-- Sits above every other window, including Chrome in full-screen, on every space.
-- Never takes focus. Clicking the panel does not bring its app forward, and
-  clicking another app does not hide it.
-- Resizes from any edge or corner. Drags from the strip at the top.
-- Fades its own backdrop from 15% to 100%. The words stay at full contrast, so
-  the script never goes muddy.
-- Sets type from 10 to 120 points in any installed font, at five weights, with a
-  search field to find a family among the hundreds macOS reports, and renders
-  `*italic*` and `**bold**` Markdown emphasis.
-- Rolls the script on its own, at a speed you can adjust.
+- **Always on top, never steals focus:** Runs as a non-activating `NSPanel` at pop-up level across all spaces and full-screen windows, with no Dock icon or menu bar.
+- **Independent backdrop opacity:** Fade the panel from 15% to 100% while the script stays at full contrast.
+- **Typography controls:** Step size from 10 to 120 pt in 1 pt increments, search installed font families (`Aa`), switch across 5 weights, and render `*italic*` and `**bold**` Markdown emphasis with gamma-corrected CoreText glyphs.
+- **Persistent state:** Remembers window frame, opacity, font family, weight, size, and last opened file in `~/Library/Application Support/Prompter/settings.json`.
 
-## Using it
+## Controls
 
 | Action | How |
 | --- | --- |
-| Move | Drag the dotted grip or the empty part of the top strip |
-| Resize | Drag any window edge or corner |
-| Text size | `−` / `+` in the strip, `Command +` / `Command -`, or `Command 0` to reset |
-| Backdrop | The slider in the strip, drag the knob |
-| Typeface | `Aa` opens the family list, type to search, `↑` / `↓` and `Return` to pick |
-| Weight | The five `Aa` chips above the family list |
-| Paste a script | `Command V` |
-| Open a file | `Command O`, or drop a text file onto the window |
-| Roll / pause | `▸` in the strip, or `Space` (`Escape` pauses) |
-| Roll speed | Click the speed number, scroll over `▸`, `[` / `]`, or `Shift ↑` / `Shift ↓` |
-| Scroll by hand | Wheel, `↑` / `↓`, `PageUp` / `PageDown`, or `Home` |
-| Quit | `×` in the strip, or `Command Q` |
+| Move | Drag the grip dots or empty top strip |
+| Resize | Drag any edge or corner |
+| Minimize | `_` in the strip or `Command M` |
+| Font size | `−` / `+`, `Command +` / `Command -`, or `Command 0` to reset |
+| Opacity | Drag the strip slider |
+| Typeface & weight | `Aa` to search fonts (`↑` / `↓` / `Return`) and pick a weight chip |
+| Load script | `Command V` to paste, `Command O` to open, drop a file, or pass a path on CLI |
+| Scroll | Trackpad / wheel, `↑` / `↓`, `PageUp` / `PageDown`, or `Home` |
+| Quit | `×` in the strip or `Command Q` |
 
-A script can also be passed on the command line: `prompter ~/script.txt`.
+## Building on macOS
 
-Size, opacity, typeface, position and the last opened file are remembered in
-`~/Library/Application Support/Prompter/settings.json`.
-
-## Building
-
-Needs a Rust toolchain and, on macOS, the Xcode command line tools.
+Requires a Rust toolchain and Xcode Command Line Tools:
 
 ```sh
 cargo build --release
@@ -51,51 +35,13 @@ cargo build --release
 open dist/Prompter.app
 ```
 
-For an Apple silicon bundle from the release profile:
+### Cross-building for Apple Silicon from Linux
 
-```sh
-cargo build --release --target aarch64-apple-darwin
-./scripts/bundle.sh
-```
-
-`scripts/bundle.sh` writes `dist/Prompter.app` and ad-hoc signs it, which is
-enough to run it locally. It is not notarised, so a copy that arrives through a
-download carries a quarantine flag: open it once with right click → Open.
-
-### Building the Apple silicon bundle on Linux
-
-This repository was built that way. Two things are needed beyond a normal
-cross-link: a macOS SDK and clang with ld64.lld.
+Needs `clang`, `lld`, the `aarch64-apple-darwin` target, and an unpacked macOS SDK (`MacOSX14.5.sdk`):
 
 ```sh
 rustup target add aarch64-apple-darwin
 MAC_SDK=/path/to/MacOSX14.5.sdk ./scripts/build-mac.sh
 ```
 
-`scripts/cross-env.sh` holds the linker settings. If the build stops on a
-missing `stitched_shaders.metal`, GPUI's macOS crate skipped its shader step
-because that build script is gated on the host OS. Run
-`MAC_SDK=... ./scripts/stitch-shaders.sh` once, which generates that file and
-reruns the build. The output is a Mach-O arm64 binary, ad-hoc signed by the
-linker, which is what Apple silicon requires to run an unsigned build at all.
-
-## How the window is put together
-
-There is no window title, in the strip or in the window menu.
-
-The window is a `WindowKind::PopUp` in GPUI, which on macOS is an `NSPanel` with
-the non-activating style at `NSPopUpWindowLevel`, plus
-`CanJoinAllSpaces | FullScreenAuxiliary`. The app runs as an accessory app, so
-it has no Dock icon and no menu bar. `src/mac.rs` adds the parts GPUI does not
-set: `setHidesOnDeactivate(false)` so the panel survives another app taking
-focus, `mouseDownCanMoveWindow` overridden to `NO` and `app_owns_titlebar_drag: true`
-so AppKit never steals slider drags in the titlebar strip, hidden traffic lights,
-no AppKit shadow, and stationary collection behaviour.
-
-`PROMPTER_DEBUG_WINDOW=1 ./Prompter.app/Contents/MacOS/prompter` prints what
-AppKit holds for the window, which is the quickest way to check the panel is
-still non-activating, resizable and at pop-up level.
-
-The transparency is per-pixel alpha from `WindowBackgroundAppearance::Transparent`.
-The panel's fill colour carries the opacity; the text colour does not, which is
-why the script stays legible at 15%.
+If GPUI's `gpui_apple` build fails on a missing `stitched_shaders.metal` (because upstream skips its build script on non-macOS hosts), run `MAC_SDK=/path/to/MacOSX14.5.sdk ./scripts/stitch-shaders.sh` once to generate it and finish the build.

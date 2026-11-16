@@ -4,23 +4,28 @@ use crate::mac;
 use crate::markdown::{self, StyledSpan};
 use crate::settings::{MAX_FONT, MAX_OPACITY, MIN_FONT, MIN_OPACITY, Settings};
 use crate::theme;
+#[cfg(not(target_os = "macos"))]
+use gpui::{FontStyle, HighlightStyle, StyledText};
+#[cfg(target_os = "macos")]
+use crate::smooth_text::{SmoothParagraph, SmoothTextRenderer};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, ExternalPaths, FocusHandle, FontStyle,
-    FontWeight, HighlightStyle, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Render, ScrollEvent, ScrollHandle,
-    ScrollStrategy, SharedString, StyledText, Subscription, Task, UniformListScrollHandle,
-    Window, canvas, div, point, px, relative, uniform_list,
+    AnyElement, App, Bounds, Context, CursorStyle, ExternalPaths, FocusHandle, FontWeight, Hsla,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathPromptOptions, Pixels, Render, ScrollHandle, ScrollStrategy, SharedString, Subscription,
+    Task, UniformListScrollHandle, Window, canvas, div, point, px, relative, uniform_list,
 };
+#[cfg(target_os = "macos")]
+use std::cell::RefCell;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Width of the opacity track, in points.
-const TRACK: f32 = 60.0;
+const TRACK: f32 = 68.0;
 /// Height of the opacity control's hit area.
 const TRACK_H: f32 = 22.0;
 /// Height of each row in the font picker list.
@@ -53,13 +58,10 @@ const FONT_SHORTLIST: &[&str] = &[
     "DejaVu Sans",
 ];
 
-/// Four preset speeds (points/sec) shown in the speed popover.
-const SPEED_PRESETS: [f32; 4] = [18.0, 28.0, 44.0, 64.0];
-
 /// Face used before the user has chosen one.
 const DEFAULT_FACE: &str = "Geist Standard";
 
-const SAMPLE: &str = "Paste a script with Command V, open a file with Command O, or drop a text file here.\n\nDrag the strip at the top to move this window. Pull any corner to resize it. The slider fades the backdrop behind *italic* and **bold** words.\n\nPress Space to roll the script, and [ or ] to adjust speed.";
+const SAMPLE: &str = "Paste a script with Command V, open a file with Command O, or drop a text file here.\n\nDrag the strip at the top to move this window, and pull any corner to resize it. The slider fades the backdrop behind *italic* and **bold** words.";
 
 #[derive(Clone)]
 struct FontEntry {
@@ -83,12 +85,9 @@ pub struct Prompter {
     scroll: ScrollHandle,
     font_scroll: UniformListScrollHandle,
     font_menu_open: bool,
-    speed_menu_open: bool,
     hovered: bool,
     dragging_opacity: bool,
     opacity_bounds: Rc<Cell<Bounds<Pixels>>>,
-    playing: bool,
-    play_task: Option<Task<()>>,
     notice: Option<SharedString>,
     notice_task: Option<Task<()>>,
     font_query: String,
@@ -96,6 +95,8 @@ pub struct Prompter {
     focus: FocusHandle,
     save_task: Option<Task<()>>,
     _bounds_observer: Option<Subscription>,
+    #[cfg(target_os = "macos")]
+    smooth_text: Rc<RefCell<SmoothTextRenderer>>,
 }
 
 impl Prompter {
@@ -127,12 +128,9 @@ impl Prompter {
             scroll: ScrollHandle::new(),
             font_scroll: UniformListScrollHandle::new(),
             font_menu_open: false,
-            speed_menu_open: false,
             hovered: false,
             dragging_opacity: false,
             opacity_bounds: Rc::new(Cell::new(Bounds::default())),
-            playing: false,
-            play_task: None,
             notice: None,
             notice_task: None,
             font_query: String::new(),
@@ -140,6 +138,8 @@ impl Prompter {
             focus: cx.focus_handle(),
             save_task: None,
             _bounds_observer: None,
+            #[cfg(target_os = "macos")]
+            smooth_text: Rc::new(RefCell::new(SmoothTextRenderer::new(theme::text()))),
         };
         if std::env::var_os("PROMPTER_DEBUG_WINDOW").is_some() {
             eprintln!(
@@ -155,6 +155,9 @@ impl Prompter {
         this.settings.x = Some(f32::from(bounds.origin.x));
         this.settings.y = Some(f32::from(bounds.origin.y));
         this._bounds_observer = Some(cx.observe_window_bounds(window, |this, window, cx| {
+            if mac::is_miniaturized(window) {
+                return;
+            }
             let bounds = window.bounds();
             this.settings.width = f32::from(bounds.size.width);
             this.settings.height = f32::from(bounds.size.height);
@@ -190,17 +193,6 @@ impl Prompter {
         self.settings.font_size = DEFAULT_FONT_SIZE;
         self.flash(SharedString::from("34 pt"), window, cx);
         self.save_debounced(window, cx);
-    }
-
-    fn set_speed(&mut self, speed: f32, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings.scroll_speed = speed.clamp(4.0, 200.0);
-        let label = format!("{} px/s", self.settings.scroll_speed.round() as i32);
-        self.flash(SharedString::from(label), window, cx);
-        self.save_debounced(window, cx);
-    }
-
-    fn bump_speed(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_speed(self.settings.scroll_speed + delta, window, cx);
     }
 
     fn set_opacity_at(&mut self, x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
@@ -248,7 +240,6 @@ impl Prompter {
     fn open_font_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         mac::make_key(window);
         self.focus.focus(window, cx);
-        self.speed_menu_open = false;
         self.font_menu_open = true;
         self.font_query.clear();
         self.refilter_fonts();
@@ -268,15 +259,6 @@ impl Prompter {
         self.font_query.clear();
         self.refilter_fonts();
         self.font_cursor = 0;
-    }
-
-    fn close_popovers(&mut self) -> bool {
-        let had_open = self.font_menu_open || self.speed_menu_open;
-        if self.font_menu_open {
-            self.close_font_menu();
-        }
-        self.speed_menu_open = false;
-        had_open
     }
 
     fn choose_family(
@@ -310,78 +292,6 @@ impl Prompter {
         };
         let family = self.fonts[entry_idx].family.clone();
         self.choose_family(family, window, cx);
-    }
-
-    fn stop_play(&mut self, cx: &mut Context<Self>) {
-        if self.playing || self.play_task.is_some() {
-            self.playing = false;
-            self.play_task = None;
-            cx.notify();
-        }
-    }
-
-    fn toggle_play(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.playing {
-            self.stop_play(cx);
-            return;
-        }
-
-        let max_y = f32::from(self.scroll.max_offset().y);
-        if max_y <= 0.5 {
-            self.flash(SharedString::from("Fits on screen"), window, cx);
-            return;
-        }
-        let current_y = f32::from(self.scroll.offset().y);
-        if current_y <= -max_y + 0.5 {
-            self.scroll.set_offset(point(px(0.0), px(0.0)));
-        }
-
-        self.playing = true;
-        cx.notify();
-
-        self.play_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let mut last = Instant::now();
-            loop {
-                cx.background_executor().timer(Duration::from_millis(8)).await;
-                let now = Instant::now();
-                let dt = now.duration_since(last).as_secs_f32().min(0.1);
-                last = now;
-
-                let keep_going = this.update_in(cx, |this, _window, cx| {
-                    if !this.playing {
-                        return false;
-                    }
-                    let max_y = f32::from(this.scroll.max_offset().y);
-                    if max_y <= 0.5 {
-                        this.playing = false;
-                        this.play_task = None;
-                        cx.notify();
-                        return false;
-                    }
-                    let offset = this.scroll.offset();
-                    let cur_y = f32::from(offset.y);
-                    if cur_y <= -max_y {
-                        this.playing = false;
-                        this.play_task = None;
-                        cx.notify();
-                        return false;
-                    }
-                    let step = this.settings.scroll_speed * dt;
-                    let next_y = (cur_y - step).max(-max_y);
-                    this.scroll.set_offset(point(offset.x, px(next_y)));
-                    cx.notify();
-                    if next_y <= -max_y {
-                        this.playing = false;
-                        this.play_task = None;
-                        return false;
-                    }
-                    true
-                });
-                if !matches!(keep_going, Ok(true)) {
-                    break;
-                }
-            }
-        }));
     }
 
     fn scroll_by(&mut self, lines: f32, cx: &mut Context<Self>) {
@@ -424,8 +334,6 @@ impl Prompter {
     }
 
     fn load_new_script(&mut self, text: &str) {
-        self.playing = false;
-        self.play_task = None;
         self.paragraphs = compile_paragraphs(text);
         self.scroll.set_offset(point(px(0.0), px(0.0)));
     }
@@ -499,10 +407,11 @@ impl Prompter {
         if platform {
             match key {
                 "q" => cx.quit(),
+                "m" => window.minimize_window(),
                 "v" => self.paste_script(window, cx),
                 "o" => self.open_script(window, cx),
-                "=" | "+" => self.bump_font(2.0, window, cx),
-                "-" => self.bump_font(-2.0, window, cx),
+                "=" | "+" => self.bump_font(1.0, window, cx),
+                "-" => self.bump_font(-1.0, window, cx),
                 "0" => self.reset_font_size(window, cx),
                 "backspace" if self.font_menu_open => {
                     if !self.font_query.is_empty() {
@@ -573,53 +482,24 @@ impl Prompter {
             }
             return;
         }
-        if self.speed_menu_open && key == "escape" {
-            self.speed_menu_open = false;
-            cx.notify();
-            return;
-        }
-        if keystroke.modifiers.shift {
-            match key {
-                "up" => {
-                    self.bump_speed(-4.0, window, cx);
-                    return;
-                }
-                "down" => {
-                    self.bump_speed(4.0, window, cx);
-                    return;
-                }
-                _ => {}
-            }
-        }
         match key {
-            "space" => self.toggle_play(window, cx),
             "up" => self.scroll_by(-1.0, cx),
             "down" => self.scroll_by(1.0, cx),
             "pageup" => self.scroll_by(-5.0, cx),
             "pagedown" => self.scroll_by(5.0, cx),
             "home" => self.scroll_to_top(cx),
-            "[" => self.bump_speed(-4.0, window, cx),
-            "]" => self.bump_speed(4.0, window, cx),
-            "escape" => {
-                if self.playing {
-                    self.stop_play(cx);
-                }
-            }
             _ => {}
         }
     }
 
-    fn header(&self, chrome: f32, progress: f32, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(&self, chrome: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let opacity = self.settings.opacity;
         let bounds_cell = self.opacity_bounds.clone();
         let fill = TRACK * (opacity - MIN_OPACITY) / (MAX_OPACITY - MIN_OPACITY);
         let knob_x = fill.max(0.0);
-        let playing = self.playing;
-        let speed_label = format!("{}", self.settings.scroll_speed.round() as i32);
 
         div()
             .id("header")
-            .relative()
             .h(px(theme::STRIP))
             .w_full()
             .flex_none()
@@ -671,85 +551,6 @@ impl Prompter {
                             .child(text.clone())
                     })),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(1.0))
-                    .on_scroll(cx.listener(
-                        |this, event: &ScrollEvent, window, cx| {
-                            cx.stop_propagation();
-                            let dy = f32::from(event.delta.pixel_delta(px(16.0)).y);
-                            if dy.abs() > 0.1 {
-                                let step = if dy > 0.0 { 2.0 } else { -2.0 };
-                                this.bump_speed(step, window, cx);
-                            }
-                        },
-                    ))
-                    .child(
-                        div()
-                            .id("play-pause")
-                            .size(px(20.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.0))
-                            .cursor(CursorStyle::PointingHand)
-                            .hover(|this| this.bg(theme::control_hover(1.0)))
-                            .opacity(if playing { 1.0 } else { chrome })
-                            .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _window, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                                this.toggle_play(window, cx);
-                            }))
-                            .child(play_glyph(playing)),
-                    )
-                    .child(
-                        div()
-                            .id("speed")
-                            .h(px(20.0))
-                            .min_w(px(22.0))
-                            .px(px(3.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(5.0))
-                            .cursor(CursorStyle::PointingHand)
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(if self.speed_menu_open {
-                                theme::accent(1.0)
-                            } else if playing {
-                                theme::faint(0.78)
-                            } else {
-                                theme::faint(0.58)
-                            })
-                            .hover(|this| {
-                                this.bg(theme::control_hover(1.0))
-                                    .text_color(theme::faint(1.0))
-                            })
-                            .opacity(if self.speed_menu_open || playing {
-                                1.0
-                            } else {
-                                chrome
-                            })
-                            .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _window, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                                this.speed_menu_open = !this.speed_menu_open;
-                                if this.speed_menu_open {
-                                    this.close_font_menu();
-                                    mac::make_key(window);
-                                    this.focus.focus(window, cx);
-                                }
-                                cx.notify();
-                            }))
-                            .child(speed_label),
-                    ),
-            )
-            .child(divider(chrome))
             .child(
                 div()
                     .id("opacity")
@@ -848,119 +649,57 @@ impl Prompter {
             .child(divider(chrome))
             .child(
                 div()
-                    .id("close")
-                    .size(px(20.0))
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .cursor(CursorStyle::PointingHand)
-                    .text_size(px(13.0))
-                    .text_color(theme::faint(0.80))
-                    .hover(|this| this.bg(theme::control_hover(1.0)).text_color(theme::faint(1.0)))
-                    .opacity(chrome)
-                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _window, cx| {
-                        cx.stop_propagation();
-                    })
-                    .on_click(|_: &gpui::ClickEvent, _window, cx| cx.quit())
-                    .child("×"),
-            )
-            .when(progress > 0.005, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .bottom(px(0.0))
-                        .left(px(0.0))
-                        .h(px(1.5))
-                        .w(relative(progress.clamp(0.0, 1.0)))
-                        .bg(theme::accent(if playing { 0.72 } else { 0.42 })),
-                )
-            })
-    }
-
-    fn speed_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.settings.scroll_speed;
-        let readout = format!("{} px/s", current.round() as i32);
-
-        div()
-            .id("speed-menu")
-            .absolute()
-            .top(px(theme::STRIP - 2.0))
-            .right(px(150.0))
-            .w(px(164.0))
-            .p(px(7.0))
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(theme::faint(0.14))
-            .bg(gpui::hsla(220.0 / 360.0, 0.16, 0.085, 0.985))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    mac::make_key(window);
-                    this.focus.focus(window, cx);
-                }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        glyph_button("speed-slower", "−", 1.0, 14.0).on_click(cx.listener(
-                            |this, _: &gpui::ClickEvent, window, cx| {
-                                this.bump_speed(-4.0, window, cx)
-                            },
-                        )),
-                    )
+                    .gap(px(1.0))
                     .child(
                         div()
-                            .text_size(px(11.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme::faint(0.88))
-                            .child(readout),
-                    )
-                    .child(
-                        glyph_button("speed-faster", "+", 1.0, 14.0).on_click(cx.listener(
-                            |this, _: &gpui::ClickEvent, window, cx| {
-                                this.bump_speed(4.0, window, cx)
-                            },
-                        )),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(3.0))
-                    .children(SPEED_PRESETS.iter().map(|&preset| {
-                        let active = (current - preset).abs() < 1.5;
-                        div()
-                            .id(SharedString::from(format!("speed-preset:{preset}")))
-                            .flex_1()
-                            .h(px(21.0))
+                            .id("minimize")
+                            .size(px(20.0))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(5.0))
+                            .rounded(px(6.0))
                             .cursor(CursorStyle::PointingHand)
-                            .bg(theme::faint(if active { 0.16 } else { 0.04 }))
-                            .hover(|this| this.bg(theme::faint(0.12)))
-                            .text_size(px(10.5))
-                            .text_color(theme::faint(if active { 1.0 } else { 0.62 }))
-                            .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _window, cx| {
-                                cx.stop_propagation();
+                            .hover(|this| this.bg(theme::control_hover(1.0)))
+                            .opacity(chrome)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                |_: &MouseDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                },
+                            )
+                            .on_click(|_: &gpui::ClickEvent, window, _cx| {
+                                window.minimize_window();
                             })
-                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
-                                this.set_speed(preset, window, cx);
-                            }))
-                            .child(format!("{}", preset as i32))
-                    })),
+                            .child(minimize_glyph()),
+                    )
+                    .child(
+                        div()
+                            .id("close")
+                            .size(px(20.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.0))
+                            .cursor(CursorStyle::PointingHand)
+                            .text_size(px(13.0))
+                            .text_color(theme::faint(0.80))
+                            .hover(|this| {
+                                this.bg(theme::control_hover(1.0))
+                                    .text_color(theme::faint(1.0))
+                            })
+                            .opacity(chrome)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                |_: &MouseDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                },
+                            )
+                            .on_click(|_: &gpui::ClickEvent, _window, cx| cx.quit())
+                            .child("×"),
+                    ),
             )
-            .into_any_element()
     }
 
     fn font_menu(&self, available: f32, cx: &mut Context<Self>) -> AnyElement {
@@ -1134,23 +873,40 @@ impl Prompter {
             .into_any_element()
     }
 
-    fn script_body(&self, viewport_h: f32, cx: &mut Context<Self>) -> impl IntoElement {
+    fn script_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let size = self.settings.font_size;
         let base_weight = self.settings.font_weight;
         let bold_weight = FontWeight((base_weight + 300.0).clamp(600.0, 900.0));
         let family = self.family.clone();
         let gap = (size * 0.62).max(10.0);
-        let bottom_pad = (viewport_h * 0.55).max(size * 1.8);
-        let guide_top = (viewport_h * 0.24).max(size * 0.52);
-        let guide_h = (size * 1.15).clamp(14.0, 34.0);
-        let guide_alpha = if self.playing {
-            0.72
-        } else if self.hovered {
-            0.38
-        } else {
-            0.18
+        let bottom_pad = (size * 1.4).max(24.0);
+
+        #[cfg(target_os = "macos")]
+        let children: Vec<AnyElement> = {
+            let bold_w = bold_weight.0;
+            let smooth_text = self.smooth_text.clone();
+            self.paragraphs
+                .iter()
+                .enumerate()
+                .map(|(ix, p)| {
+                    SmoothParagraph::new(
+                        SharedString::from(format!("para:{ix}")),
+                        p.text.clone(),
+                        p.spans.clone(),
+                        family.clone(),
+                        size,
+                        base_weight,
+                        bold_w,
+                        1.46,
+                        theme::text(),
+                        smooth_text.clone(),
+                    )
+                    .into_any_element()
+                })
+                .collect()
         };
 
+        #[cfg(not(target_os = "macos"))]
         let children: Vec<AnyElement> = self
             .paragraphs
             .iter()
@@ -1209,51 +965,26 @@ impl Prompter {
                             .children(children),
                     ),
             )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(10.0))
-                    .top(px(guide_top))
-                    .w(px(2.5))
-                    .h(px(guide_h))
-                    .rounded_full()
-                    .bg(theme::accent(guide_alpha)),
-            )
     }
 }
 
 impl Render for Prompter {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let chrome = if self.hovered
-            || self.dragging_opacity
-            || self.font_menu_open
-            || self.speed_menu_open
-        {
+        let chrome = if self.hovered || self.dragging_opacity || self.font_menu_open {
             1.0
         } else {
             0.52
         };
         let alpha = self.settings.opacity;
-        let viewport_h = (f32::from(window.bounds().size.height) - theme::STRIP).max(80.0);
-        let menu_height = viewport_h - 12.0;
-
-        let max_y = f32::from(self.scroll.max_offset().y);
-        let cur_y = f32::from(self.scroll.offset().y);
-        let progress = if max_y > 0.5 {
-            (-cur_y / max_y).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        let menu_height = f32::from(window.bounds().size.height) - theme::STRIP - 12.0;
 
         let menu = if self.font_menu_open {
             Some(self.font_menu(menu_height, cx))
-        } else if self.speed_menu_open {
-            Some(self.speed_menu(cx))
         } else {
             None
         };
-        let body = self.script_body(viewport_h, cx);
-        let header = self.header(chrome, progress, cx);
+        let body = self.script_body(cx);
+        let header = self.header(chrome, cx);
 
         div()
             .id("prompter")
@@ -1304,7 +1035,8 @@ impl Render for Prompter {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _w, cx| {
-                    if this.close_popovers() {
+                    if this.font_menu_open {
+                        this.close_font_menu();
                         cx.notify();
                     }
                 }),
@@ -1326,23 +1058,17 @@ fn pop_last_word(s: &mut String) -> bool {
     s.len() != before
 }
 
-fn play_glyph(playing: bool) -> AnyElement {
-    if playing {
-        div()
-            .flex()
-            .items_center()
-            .gap(px(2.5))
-            .child(div().w(px(2.0)).h(px(8.0)).rounded(px(0.5)).bg(theme::accent(1.0)))
-            .child(div().w(px(2.0)).h(px(8.0)).rounded(px(0.5)).bg(theme::accent(1.0)))
-            .into_any_element()
-    } else {
-        div()
-            .text_size(px(11.0))
-            .text_color(theme::faint(0.80))
-            .pl(px(1.0))
-            .child("▸")
-            .into_any_element()
-    }
+fn minimize_glyph() -> AnyElement {
+    div()
+        .pt(px(5.0))
+        .child(
+            div()
+                .w(px(8.0))
+                .h(px(1.5))
+                .rounded(px(0.5))
+                .bg(theme::faint(0.80)),
+        )
+        .into_any_element()
 }
 
 fn glyph_button(
@@ -1386,7 +1112,7 @@ fn font_size_group(size: f32, chrome: f32, cx: &mut Context<Prompter>) -> impl I
         .child(
             glyph_button("font-smaller", "−", chrome, 14.0)
                 .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                    this.bump_font(-2.0, window, cx)
+                    this.bump_font(-1.0, window, cx)
                 })),
         )
         .child(
@@ -1401,7 +1127,7 @@ fn font_size_group(size: f32, chrome: f32, cx: &mut Context<Prompter>) -> impl I
         .child(
             glyph_button("font-larger", "+", chrome, 14.0)
                 .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                    this.bump_font(2.0, window, cx)
+                    this.bump_font(1.0, window, cx)
                 })),
         )
 }

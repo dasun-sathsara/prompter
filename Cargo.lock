@@ -3700,12 +3700,17 @@ dependencies = [
 name = "prompter"
 version = "0.1.0"
 dependencies = [
+ "core-foundation",
+ "core-graphics",
+ "core-text",
  "gpui",
  "gpui_platform",
+ "image",
  "objc2 0.6.5",
  "raw-window-handle",
  "serde",
  "serde_json",
+ "smallvec",
 ]
 
 [[package]]
