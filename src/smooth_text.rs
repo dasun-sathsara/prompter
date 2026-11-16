@@ -165,7 +165,6 @@ mod imp {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
     use std::ffi::c_void;
-    use std::hash::{Hash, Hasher};
     use std::ptr::null;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -254,14 +253,24 @@ mod imp {
 
     #[derive(Clone, Eq, PartialEq, Hash)]
     struct LayoutKey {
-        text_hash: u64,
-        text_len: usize,
-        spans_hash: u64,
+        text: SharedString,
+        spans: Vec<StyledSpan>,
         family: Option<String>,
         size_centipts: u32,
         base_weight: i32,
         bold_weight: i32,
         wrap_width_centipts: i32,
+    }
+
+    /// Typography parameters for a [`SmoothParagraph`].
+    #[derive(Clone)]
+    pub struct TextRunStyle {
+        pub family: Option<SharedString>,
+        pub font_size: f32,
+        pub base_weight: f32,
+        pub bold_weight: f32,
+        pub line_height: f32,
+        pub color: Hsla,
     }
 
     struct CachedLayout {
@@ -369,19 +378,19 @@ mod imp {
 
         fn layout_paragraph(
             &mut self,
-            text: &str,
+            text: &SharedString,
             spans: &[StyledSpan],
-            family: Option<&str>,
-            font_size: f32,
-            base_weight: f32,
-            bold_weight: f32,
+            style: &TextRunStyle,
             wrap_width: f32,
         ) -> (Arc<Vec<WrappedLineData>>, f32) {
+            let family = style.family.as_deref();
+            let font_size = style.font_size;
+            let base_weight = style.base_weight;
+            let bold_weight = style.bold_weight;
             let wrap_centi = (wrap_width.max(1.0) * 100.0).round() as i32;
             let key = LayoutKey {
-                text_hash: hash_str(text),
-                text_len: text.len(),
-                spans_hash: hash_spans(spans),
+                text: text.clone(),
+                spans: spans.to_vec(),
                 family: family.map(str::to_owned),
                 size_centipts: (font_size * 100.0).round() as u32,
                 base_weight: (base_weight * 10.0).round() as i32,
@@ -548,76 +557,92 @@ mod imp {
     fn create_ct_font(family: Option<&str>, font_size: f32, weight: f32, italic: bool) -> CTFont {
         let target_weight = weight_to_ct_trait(weight);
         if let Some(family_name) = family {
-            let cf_family = CFString::new(family_name);
-            let attrs = unsafe {
-                CFDictionary::from_CFType_pairs(&[(
-                    CFString::wrap_under_get_rule(kCTFontFamilyNameAttribute),
-                    cf_family.as_CFType(),
-                )])
-            };
-            let query = font::new_from_descriptor(
-                &core_text::font_descriptor::new_from_attributes(&attrs),
-                font_size as CGFloat,
-            );
-            let base_desc = query.copy_descriptor();
-            let array_ref = unsafe {
-                CTFontDescriptorCreateMatchingFontDescriptors(base_desc.as_concrete_TypeRef(), null())
-            };
-            if !array_ref.is_null() {
-                let candidates: CFArray<CTFontDescriptor> =
-                    unsafe { CFArray::wrap_under_create_rule(array_ref) };
-                let mut best: Option<((bool, i32, bool), CTFontDescriptor, bool)> = None;
-                for desc in candidates.iter() {
-                    let traits = desc.traits();
-                    let sym = traits.symbolic_traits();
-                    let slant_key = unsafe { CFString::wrap_under_get_rule(kCTFontSlantTrait) };
-                    let weight_key = unsafe { CFString::wrap_under_get_rule(kCTFontWeightTrait) };
-                    let slant = traits
-                        .find(&slant_key)
-                        .and_then(|v| v.downcast::<CFNumber>())
-                        .and_then(|n| n.to_f64())
-                        .unwrap_or(0.0);
-                    let w_trait = traits
-                        .find(&weight_key)
-                        .and_then(|v| v.downcast::<CFNumber>())
-                        .and_then(|n| n.to_f64())
-                        .unwrap_or(0.0);
-                    let is_italic = sym.is_italic() || slant.abs() > 0.01;
-                    let italic_mismatch = is_italic != italic;
-                    let weight_dist = ((w_trait - target_weight).abs() * 10000.0).round() as i32;
-                    let lacks_var = unsafe {
-                        let attr =
-                            CTFontDescriptorCopyAttribute(desc.as_concrete_TypeRef(), kCTFontVariationAttribute);
-                        if attr.is_null() {
-                            true
-                        } else {
-                            CFRelease(attr);
-                            false
-                        }
-                    };
-                    let score = (italic_mismatch, weight_dist, lacks_var);
-                    let replace = best
-                        .as_ref()
-                        .map_or(true, |(best_score, _, _)| score < *best_score);
-                    if replace {
-                        best = Some((score, desc.clone(), is_italic));
-                    }
-                }
-                if let Some((_, best_desc, matched_italic)) = best {
-                    let matched = font::new_from_descriptor(&best_desc, font_size as CGFloat);
-                    if italic && !matched_italic {
-                        if let Some(slanted) =
-                            matched.clone_with_symbolic_traits(kCTFontItalicTrait, kCTFontItalicTrait)
-                        {
-                            return slanted;
-                        }
-                    }
-                    return matched;
-                }
+            if let Some(matched) = match_family_font(family_name, font_size, target_weight, italic)
+            {
+                return matched;
             }
-            let _ = query;
+        }
+        system_ct_font(font_size, target_weight, italic)
+    }
+
+    fn match_family_font(
+        family_name: &str,
+        font_size: f32,
+        target_weight: f64,
+        italic: bool,
+    ) -> Option<CTFont> {
+        let cf_family = CFString::new(family_name);
+        let attrs = unsafe {
+            CFDictionary::from_CFType_pairs(&[(
+                CFString::wrap_under_get_rule(kCTFontFamilyNameAttribute),
+                cf_family.as_CFType(),
+            )])
+        };
+        let query = font::new_from_descriptor(
+            &core_text::font_descriptor::new_from_attributes(&attrs),
+            font_size as CGFloat,
+        );
+        let base_desc = query.copy_descriptor();
+        let array_ref = unsafe {
+            CTFontDescriptorCreateMatchingFontDescriptors(base_desc.as_concrete_TypeRef(), null())
+        };
+        if array_ref.is_null() {
+            return None;
         }
 
+        let candidates: CFArray<CTFontDescriptor> =
+            unsafe { CFArray::wrap_under_create_rule(array_ref) };
+        let slant_key = unsafe { CFString::wrap_under_get_rule(kCTFontSlantTrait) };
+        let weight_key = unsafe { CFString::wrap_under_get_rule(kCTFontWeightTrait) };
+
+        let mut best: Option<((bool, i32, bool), CTFontDescriptor, bool)> = None;
+        for desc in candidates.iter() {
+            let traits = desc.traits();
+            let slant = traits
+                .find(&slant_key)
+                .and_then(|v| v.downcast::<CFNumber>())
+                .and_then(|n| n.to_f64())
+                .unwrap_or(0.0);
+            let w_trait = traits
+                .find(&weight_key)
+                .and_then(|v| v.downcast::<CFNumber>())
+                .and_then(|n| n.to_f64())
+                .unwrap_or(0.0);
+            let is_italic = traits.symbolic_traits().is_italic() || slant.abs() > 0.01;
+            let italic_mismatch = is_italic != italic;
+            let weight_dist = ((w_trait - target_weight).abs() * 10000.0).round() as i32;
+            let lacks_var = unsafe {
+                let attr =
+                    CTFontDescriptorCopyAttribute(desc.as_concrete_TypeRef(), kCTFontVariationAttribute);
+                if attr.is_null() {
+                    true
+                } else {
+                    CFRelease(attr);
+                    false
+                }
+            };
+            let score = (italic_mismatch, weight_dist, lacks_var);
+            if best
+                .as_ref()
+                .is_none_or(|(best_score, _, _)| score < *best_score)
+            {
+                best = Some((score, desc.clone(), is_italic));
+            }
+        }
+
+        let (_, best_desc, matched_italic) = best?;
+        let matched = font::new_from_descriptor(&best_desc, font_size as CGFloat);
+        if italic && !matched_italic {
+            if let Some(slanted) =
+                matched.clone_with_symbolic_traits(kCTFontItalicTrait, kCTFontItalicTrait)
+            {
+                return Some(slanted);
+            }
+        }
+        Some(matched)
+    }
+
+    fn system_ct_font(font_size: f32, target_weight: f64, italic: bool) -> CTFont {
         // System font via AppKit so optical size + SF weights match macOS UI.
         let mut system_ct: Option<CTFont> = None;
         objc2::rc::autoreleasepool(|_| unsafe {
@@ -800,63 +825,29 @@ mod imp {
         }
     }
 
-    fn hash_str(s: &str) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        s.hash(&mut h);
-        h.finish()
-    }
-
-    fn hash_spans(spans: &[StyledSpan]) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        spans.len().hash(&mut h);
-        for span in spans {
-            span.range.start.hash(&mut h);
-            span.range.end.hash(&mut h);
-            span.style.bold.hash(&mut h);
-            span.style.italic.hash(&mut h);
-        }
-        h.finish()
-    }
-
     /// A paragraph element rendered with CoreText shaping and perceptual
     /// linear/gamma-corrected glyph tiles.
     pub struct SmoothParagraph {
         id: ElementId,
         text: SharedString,
         spans: Vec<StyledSpan>,
-        family: Option<SharedString>,
-        font_size: f32,
-        base_weight: f32,
-        bold_weight: f32,
-        line_height_multiplier: f32,
-        color: Hsla,
+        style: TextRunStyle,
         renderer: Rc<RefCell<SmoothTextRenderer>>,
     }
 
     impl SmoothParagraph {
-        #[allow(clippy::too_many_arguments)]
         pub fn new(
             id: impl Into<ElementId>,
             text: SharedString,
             spans: Vec<StyledSpan>,
-            family: Option<SharedString>,
-            font_size: f32,
-            base_weight: f32,
-            bold_weight: f32,
-            line_height_multiplier: f32,
-            color: Hsla,
+            style: TextRunStyle,
             renderer: Rc<RefCell<SmoothTextRenderer>>,
         ) -> Self {
             Self {
                 id: id.into(),
                 text,
                 spans,
-                family,
-                font_size,
-                base_weight,
-                bold_weight,
-                line_height_multiplier,
-                color,
+                style,
                 renderer,
             }
         }
@@ -886,18 +877,14 @@ mod imp {
             window: &mut Window,
             _cx: &mut App,
         ) -> (LayoutId, Self::RequestLayoutState) {
-            let line_height = px(self.font_size * self.line_height_multiplier);
+            let line_height = px(self.style.font_size * self.style.line_height);
             let lines_holder: Rc<RefCell<Option<Arc<Vec<WrappedLineData>>>>> =
                 Rc::new(RefCell::new(None));
 
             let layout_id = window.request_measured_layout(Default::default(), {
                 let text = self.text.clone();
                 let spans = self.spans.clone();
-                let family = self.family.clone();
-                let font_size = self.font_size;
-                let base_weight = self.base_weight;
-                let bold_weight = self.bold_weight;
-                let color = self.color;
+                let style = self.style.clone();
                 let renderer = self.renderer.clone();
                 let lines_holder = lines_holder.clone();
 
@@ -913,16 +900,14 @@ mod imp {
 
                     let scale = window.scale_factor();
                     let mut r = renderer.borrow_mut();
-                    r.sync_config(family.as_deref(), font_size, base_weight, color, scale);
-                    let (lines, max_width) = r.layout_paragraph(
-                        &text,
-                        &spans,
-                        family.as_deref(),
-                        font_size,
-                        base_weight,
-                        bold_weight,
-                        wrap_width,
+                    r.sync_config(
+                        style.family.as_deref(),
+                        style.font_size,
+                        style.base_weight,
+                        style.color,
+                        scale,
                     );
+                    let (lines, max_width) = r.layout_paragraph(&text, &spans, &style, wrap_width);
                     let height = px(lines.len().max(1) as f32 * f32::from(line_height));
                     let width = px(max_width.ceil());
                     *lines_holder.borrow_mut() = Some(lines);
@@ -968,31 +953,24 @@ mod imp {
 
             let mut renderer = self.renderer.borrow_mut();
             renderer.sync_config(
-                self.family.as_deref(),
-                self.font_size,
-                self.base_weight,
-                self.color,
+                self.style.family.as_deref(),
+                self.style.font_size,
+                self.style.base_weight,
+                self.style.color,
                 scale,
             );
             renderer.flush_drops(window);
 
-            let lines = request_layout
-                .lines
-                .borrow()
-                .clone()
-                .unwrap_or_else(|| {
-                    renderer
-                        .layout_paragraph(
-                            &self.text,
-                            &self.spans,
-                            self.family.as_deref(),
-                            self.font_size,
-                            self.base_weight,
-                            self.bold_weight,
-                            f32::from(bounds.size.width).max(1.0),
-                        )
-                        .0
-                });
+            let lines = request_layout.lines.borrow().clone().unwrap_or_else(|| {
+                renderer
+                    .layout_paragraph(
+                        &self.text,
+                        &self.spans,
+                        &self.style,
+                        f32::from(bounds.size.width).max(1.0),
+                    )
+                    .0
+            });
 
             for (line_ix, line) in lines.iter().enumerate() {
                 let line_top_pt = origin_y_pt + line_ix as f32 * line_h;
@@ -1045,7 +1023,7 @@ mod imp {
 }
 
 #[cfg(target_os = "macos")]
-pub use imp::{SmoothParagraph, SmoothTextRenderer};
+pub use imp::{SmoothParagraph, SmoothTextRenderer, TextRunStyle};
 
 #[cfg(test)]
 mod tests {

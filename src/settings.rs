@@ -79,13 +79,6 @@ impl Settings {
         }
         let _ = std::fs::write(path, text);
     }
-
-    #[allow(dead_code)]
-    pub fn save(&self) {
-        if let Some(text) = self.to_json() {
-            Self::write_serialized(&text);
-        }
-    }
 }
 
 fn config_file() -> PathBuf {

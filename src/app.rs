@@ -7,7 +7,7 @@ use crate::theme;
 #[cfg(not(target_os = "macos"))]
 use gpui::{FontStyle, HighlightStyle, StyledText};
 #[cfg(target_os = "macos")]
-use crate::smooth_text::{SmoothParagraph, SmoothTextRenderer};
+use crate::smooth_text::{SmoothParagraph, SmoothTextRenderer, TextRunStyle};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, ExternalPaths, FocusHandle, FontWeight, Hsla,
@@ -32,6 +32,8 @@ const TRACK_H: f32 = 22.0;
 const FONT_ROW_H: f32 = 23.0;
 /// Default font size used by Command+0 reset.
 const DEFAULT_FONT_SIZE: f32 = 34.0;
+/// Line height multiplier shared between layout and keyboard scrolling.
+const LINE_HEIGHT: f32 = 1.46;
 
 /// Offered at the top of the family list when they are installed. The first
 /// that resolves also becomes the default face on a fresh install.
@@ -298,7 +300,7 @@ impl Prompter {
         let offset = self.scroll.offset();
         let cur_y = f32::from(offset.y);
         let limit = f32::from(self.scroll.max_offset().y).max(0.0);
-        let step = self.settings.font_size * 1.46 * lines;
+        let step = self.settings.font_size * LINE_HEIGHT * lines;
         let next = (cur_y - step).clamp(-limit, 0.0);
         self.scroll.set_offset(point(offset.x, px(next)));
         cx.notify();
@@ -400,11 +402,69 @@ impl Prompter {
         .detach();
     }
 
+    fn apply_font_query_change(&mut self, cx: &mut Context<Self>) {
+        self.font_cursor = 0;
+        self.refilter_fonts();
+        self.font_scroll.scroll_to_item(0, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    fn handle_font_menu_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keystroke = &event.keystroke;
+        match keystroke.key.as_str() {
+            "escape" => {
+                self.close_font_menu();
+                cx.notify();
+            }
+            "backspace" => {
+                let changed = if keystroke.modifiers.alt {
+                    pop_last_word(&mut self.font_query)
+                } else {
+                    self.font_query.pop().is_some()
+                };
+                if changed {
+                    self.apply_font_query_change(cx);
+                }
+            }
+            "enter" => self.pick_filtered(window, cx),
+            "down" => {
+                if !self.filtered_fonts.is_empty() {
+                    self.font_cursor = (self.font_cursor + 1).min(self.filtered_fonts.len() - 1);
+                    self.font_scroll
+                        .scroll_to_item(self.font_cursor, ScrollStrategy::Nearest);
+                    cx.notify();
+                }
+            }
+            "up" => {
+                self.font_cursor = self.font_cursor.saturating_sub(1);
+                self.font_scroll
+                    .scroll_to_item(self.font_cursor, ScrollStrategy::Nearest);
+                cx.notify();
+            }
+            _ => {
+                if let Some(text) = keystroke.key_char.as_ref() {
+                    if !text.is_empty()
+                        && !text.chars().any(char::is_control)
+                        && !keystroke.modifiers.control
+                        && !keystroke.modifiers.alt
+                    {
+                        self.font_query.push_str(text);
+                        self.apply_font_query_change(cx);
+                    }
+                }
+            }
+        }
+    }
+
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
-        let platform = keystroke.modifiers.platform;
         let key = keystroke.key.as_str();
-        if platform {
+        if keystroke.modifiers.platform {
             match key {
                 "q" => cx.quit(),
                 "m" => window.minimize_window(),
@@ -413,73 +473,16 @@ impl Prompter {
                 "=" | "+" => self.bump_font(1.0, window, cx),
                 "-" => self.bump_font(-1.0, window, cx),
                 "0" => self.reset_font_size(window, cx),
-                "backspace" if self.font_menu_open => {
-                    if !self.font_query.is_empty() {
-                        self.font_query.clear();
-                        self.font_cursor = 0;
-                        self.refilter_fonts();
-                        self.font_scroll
-                            .scroll_to_item(0, ScrollStrategy::Nearest);
-                        cx.notify();
-                    }
+                "backspace" if self.font_menu_open && !self.font_query.is_empty() => {
+                    self.font_query.clear();
+                    self.apply_font_query_change(cx);
                 }
                 _ => {}
             }
             return;
         }
         if self.font_menu_open {
-            match key {
-                "escape" => {
-                    self.close_font_menu();
-                    cx.notify();
-                }
-                "backspace" => {
-                    let changed = if keystroke.modifiers.alt {
-                        pop_last_word(&mut self.font_query)
-                    } else {
-                        self.font_query.pop().is_some()
-                    };
-                    if changed {
-                        self.font_cursor = 0;
-                        self.refilter_fonts();
-                        self.font_scroll
-                            .scroll_to_item(0, ScrollStrategy::Nearest);
-                        cx.notify();
-                    }
-                }
-                "enter" => self.pick_filtered(window, cx),
-                "down" => {
-                    if !self.filtered_fonts.is_empty() {
-                        self.font_cursor =
-                            (self.font_cursor + 1).min(self.filtered_fonts.len() - 1);
-                        self.font_scroll
-                            .scroll_to_item(self.font_cursor, ScrollStrategy::Nearest);
-                        cx.notify();
-                    }
-                }
-                "up" => {
-                    self.font_cursor = self.font_cursor.saturating_sub(1);
-                    self.font_scroll
-                        .scroll_to_item(self.font_cursor, ScrollStrategy::Nearest);
-                    cx.notify();
-                }
-                _ => {
-                    if let Some(text) = keystroke.key_char.as_ref() {
-                        if !text.is_empty()
-                            && !text.chars().any(char::is_control)
-                            && !keystroke.modifiers.control
-                            && !keystroke.modifiers.alt
-                        {
-                            self.font_query.push_str(text);
-                            self.font_cursor = 0;
-                            self.refilter_fonts();
-                            self.font_scroll
-                                .scroll_to_item(0, ScrollStrategy::Nearest);
-                            cx.notify();
-                        }
-                    }
-                }
-            }
+            self.handle_font_menu_key(event, window, cx);
             return;
         }
         match key {
@@ -653,51 +656,15 @@ impl Prompter {
                     .items_center()
                     .gap(px(1.0))
                     .child(
-                        div()
-                            .id("minimize")
-                            .size(px(20.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.0))
-                            .cursor(CursorStyle::PointingHand)
-                            .hover(|this| this.bg(theme::control_hover(1.0)))
-                            .opacity(chrome)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                |_: &MouseDownEvent, _window, cx| {
-                                    cx.stop_propagation();
-                                },
-                            )
+                        strip_icon_button("minimize", chrome)
                             .on_click(|_: &gpui::ClickEvent, window, _cx| {
                                 window.minimize_window();
                             })
                             .child(minimize_glyph()),
                     )
                     .child(
-                        div()
-                            .id("close")
-                            .size(px(20.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.0))
-                            .cursor(CursorStyle::PointingHand)
-                            .text_size(px(13.0))
-                            .text_color(theme::faint(0.80))
-                            .hover(|this| {
-                                this.bg(theme::control_hover(1.0))
-                                    .text_color(theme::faint(1.0))
-                            })
-                            .opacity(chrome)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                |_: &MouseDownEvent, _window, cx| {
-                                    cx.stop_propagation();
-                                },
-                            )
-                            .on_click(|_: &gpui::ClickEvent, _window, cx| cx.quit())
-                            .child("×"),
+                        glyph_button("close", "×", chrome, 13.0)
+                            .on_click(|_: &gpui::ClickEvent, _window, cx| cx.quit()),
                     ),
             )
     }
@@ -883,7 +850,14 @@ impl Prompter {
 
         #[cfg(target_os = "macos")]
         let children: Vec<AnyElement> = {
-            let bold_w = bold_weight.0;
+            let style = TextRunStyle {
+                family: family.clone(),
+                font_size: size,
+                base_weight,
+                bold_weight: bold_weight.0,
+                line_height: LINE_HEIGHT,
+                color: theme::text(),
+            };
             let smooth_text = self.smooth_text.clone();
             self.paragraphs
                 .iter()
@@ -893,12 +867,7 @@ impl Prompter {
                         SharedString::from(format!("para:{ix}")),
                         p.text.clone(),
                         p.spans.clone(),
-                        family.clone(),
-                        size,
-                        base_weight,
-                        bold_w,
-                        1.46,
-                        theme::text(),
+                        style.clone(),
                         smooth_text.clone(),
                     )
                     .into_any_element()
@@ -946,7 +915,7 @@ impl Prompter {
                     .pb(px(bottom_pad))
                     .when_some(family, |this, family| this.font_family(family))
                     .text_size(px(size))
-                    .line_height(relative(1.46))
+                    .line_height(relative(LINE_HEIGHT))
                     .font_weight(FontWeight(base_weight))
                     .text_color(theme::text())
                     .on_mouse_down(
@@ -1071,12 +1040,7 @@ fn minimize_glyph() -> AnyElement {
         .into_any_element()
 }
 
-fn glyph_button(
-    id: &'static str,
-    label: &'static str,
-    chrome: f32,
-    size: f32,
-) -> gpui::Stateful<gpui::Div> {
+fn strip_icon_button(id: &'static str, chrome: f32) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .size(px(20.0))
@@ -1085,13 +1049,22 @@ fn glyph_button(
         .justify_center()
         .rounded(px(6.0))
         .cursor(CursorStyle::PointingHand)
-        .text_size(px(size))
-        .text_color(theme::faint(0.80))
         .hover(|this| this.bg(theme::control_hover(1.0)).text_color(theme::faint(1.0)))
         .opacity(chrome)
         .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _window, cx| {
             cx.stop_propagation();
         })
+}
+
+fn glyph_button(
+    id: &'static str,
+    label: &'static str,
+    chrome: f32,
+    size: f32,
+) -> gpui::Stateful<gpui::Div> {
+    strip_icon_button(id, chrome)
+        .text_size(px(size))
+        .text_color(theme::faint(0.80))
         .child(label)
 }
 

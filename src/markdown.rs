@@ -2,13 +2,13 @@
 
 use std::ops::Range;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SpanStyle {
     pub bold: bool,
     pub italic: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StyledSpan {
     pub range: Range<usize>,
     pub style: SpanStyle,
